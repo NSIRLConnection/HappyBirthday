@@ -15,6 +15,7 @@ struct DetailsView: View {
     @FocusState private var nameFieldFocused: Bool
 
     @State private var isEditingBirthday = false
+    @State private var showBirthday = false
     @State private var showPhotoOptions = false
     @State private var showLibraryPicker = false
     @State private var selectedPhotoItem: PhotosPickerItem?
@@ -98,6 +99,9 @@ struct DetailsView: View {
                     isEditingBirthday = false
                 }
             )
+        }
+        .fullScreenCover(isPresented: $showBirthday) {
+            BirthdayView(store: store, onClose: { showBirthday = false })
         }
         .fullScreenCover(isPresented: $presentCamera, onDismiss: commitStagedCapture) {
             CameraPicker(
@@ -242,8 +246,9 @@ struct DetailsView: View {
     // MARK: - Action
 
     private var showBirthdayButton: some View {
-        // Navigation itself is step 3; here the button only reflects readiness.
         Button {
+            nameFieldFocused = false
+            showBirthday = true
         } label: {
             // Fill the available width and wrap centered at large sizes rather
             // than growing into a tall single-line capsule.
