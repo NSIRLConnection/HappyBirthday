@@ -1,0 +1,30 @@
+# macOS
+.DS_Store
+
+# Xcode user-specific state
+xcuserdata/
+*.xcuserstate
+*.xcuserdatad/
+
+# Build output / derived data
+build/
+DerivedData/
+*.moved-aside
+*.hmap
+*.ipa
+*.dSYM.zip
+*.dSYM
+
+# Swift Package Manager
+.build/
+.swiftpm/
+
+# Playgrounds
+timeline.xctimeline
+playground.xcworkspace
+
+# Local review evidence (screenshots, test output) — keep local, do not commit
+.artifacts/
+
+# Original proprietary assignment asset (keep local, do not commit)
+Happy_Birthday!_(2)-1.pdf
