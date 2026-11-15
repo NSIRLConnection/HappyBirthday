@@ -1,10 +1,17 @@
 import XCTest
 
-/// One useful launch smoke test: the details screen appears and the button is
-/// disabled on a fresh (empty) launch.
+/// Launch and accessibility smoke coverage. These tests run the app against an
+/// isolated, reset store (via launch arguments) so they are deterministic and
+/// never read or modify real user app data.
 final class LaunchSmokeTests: XCTestCase {
-    func testDetailsScreenLaunchesWithDisabledButton() {
+    private func makeApp(extraArguments: [String] = []) -> XCUIApplication {
         let app = XCUIApplication()
+        app.launchArguments += ["--uitest", "--uitest-reset"] + extraArguments
+        return app
+    }
+
+    func testDetailsScreenLaunchesWithDisabledButton() {
+        let app = makeApp()
         app.launch()
 
         XCTAssertTrue(
@@ -27,11 +34,10 @@ final class LaunchSmokeTests: XCTestCase {
     /// title is reachable, and the disabled button can be scrolled to and is
     /// still both reachable (hittable) and disabled.
     func testDisabledButtonStaysReachableAtLargestAccessibilitySize() {
-        let app = XCUIApplication()
-        app.launchArguments += [
+        let app = makeApp(extraArguments: [
             "-UIPreferredContentSizeCategoryName",
             "UICTContentSizeCategoryAccessibilityXXXL",
-        ]
+        ])
         app.launch()
 
         XCTAssertTrue(
