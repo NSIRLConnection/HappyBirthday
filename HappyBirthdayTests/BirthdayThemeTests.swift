@@ -57,6 +57,15 @@ final class BirthdayThemeTests: XCTestCase {
         XCTAssertEqual(BirthdayTheme.pelican.backgroundAssetName, "birthday-pelican-background")
     }
 
+    func testEachThemeMapsToItsMatchingCameraArtwork() {
+        // The camera control is colour-matched to the animal: fox→green,
+        // elephant→yellow, pelican→blue, and the three are distinct.
+        XCTAssertEqual(BirthdayTheme.fox.cameraAssetName, "camera-green")
+        XCTAssertEqual(BirthdayTheme.elephant.cameraAssetName, "camera-yellow")
+        XCTAssertEqual(BirthdayTheme.pelican.cameraAssetName, "camera-blue")
+        XCTAssertEqual(Set(BirthdayTheme.allCases.map(\.cameraAssetName)).count, 3)
+    }
+
     func testPresentationProviderOverrideRequiresBothFlags() {
         // The theme override only applies when --uitest is present too, so it can
         // never affect the normal app.

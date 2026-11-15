@@ -26,6 +26,16 @@ enum BirthdayTheme: String, CaseIterable, Equatable {
     /// when there is no photo, and whose ring frames the photo when there is one.
     var placeholderAssetName: String { "birthday-baby-\(rawValue)" }
 
+    /// The theme-matched camera control artwork (white camera + plus) that sits
+    /// on the photo ring. Each theme uses the colour that matches its animal.
+    var cameraAssetName: String {
+        switch self {
+        case .fox:      return BirthdayAsset.cameraGreen
+        case .elephant: return BirthdayAsset.cameraYellow
+        case .pelican:  return BirthdayAsset.cameraBlue
+        }
+    }
+
     // MARK: - Shared tokens
 
     /// Title and unit-caption colour, shared across the three themes (#394562).
@@ -78,6 +88,12 @@ enum BirthdayAsset {
     static let logo = "nanit-logo"
     static let closeArrow = "birthday-close-arrow"
 
+    // The theme-matched camera controls (white camera + plus on the ring),
+    // mapped per theme in `BirthdayTheme.cameraAssetName`.
+    static let cameraGreen = "camera-green"
+    static let cameraBlue = "camera-blue"
+    static let cameraYellow = "camera-yellow"
+
     static func digit(_ character: Character) -> String { "birthday-digit-\(character)" }
 
     /// Every asset the birthday screen requires at runtime; the test asserts all
@@ -91,6 +107,7 @@ enum BirthdayAsset {
             "birthday-baby-elephant",
             "birthday-baby-pelican",
             swirlLeft, swirlRight, logo, closeArrow,
+            cameraGreen, cameraBlue, cameraYellow,
         ]
         names += (0...9).map { "birthday-digit-\($0)" }
         return names

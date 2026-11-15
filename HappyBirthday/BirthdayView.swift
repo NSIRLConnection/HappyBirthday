@@ -18,6 +18,9 @@ struct BirthdayView: View {
     let onClose: () -> Void
 
     @StateObject private var model: BirthdayScreenModel
+    // The birthday screen runs its own add/change-photo flow (dialog, picker,
+    // camera, import coordination) independently of the details screen behind it.
+    @StateObject private var photoSelection = PhotoSelection()
     @Environment(\.dynamicTypeSize) private var dynamicTypeSize
     @ScaledMetric(relativeTo: .title2) private var titleFontSize: CGFloat = 21
     @ScaledMetric(relativeTo: .title2) private var unitFontSize: CGFloat = 21
@@ -86,6 +89,10 @@ struct BirthdayView: View {
                 closeButton
             }
         }
+        // Dialog, library picker, camera, and the camera/import error alerts —
+        // presented from the birthday screen itself so they appear above it
+        // rather than on the hidden details screen underneath.
+        .photoSelection(photoSelection, store: store)
     }
 
     /// Fall back to a scrollable, single-stack layout when the design's fixed
@@ -138,9 +145,18 @@ struct BirthdayView: View {
 
             Group {
                 if showPhoto {
+                    // Lower pass: the photo only, which sits beneath the
+                    // illustration. The camera control is deliberately absent
+                    // here so it is never duplicated or buried under the art.
                     photoView(diameter: diameter)
                 } else {
-                    Color.clear.frame(width: diameter, height: diameter)
+                    // Upper (foreground) pass: a transparent slot aligned with
+                    // the photo below, carrying the single camera control and the
+                    // import spinner above the illustration.
+                    Color.clear
+                        .frame(width: diameter, height: diameter)
+                        .overlay(alignment: .center) { cameraButton(diameter: diameter) }
+                        .overlay { importingIndicator }
                 }
             }
 
@@ -166,6 +182,11 @@ struct BirthdayView: View {
                 header(availableWidth: contentWidth, decorative: false)
                 Spacer().frame(height: 28)
                 photoView(diameter: diameter)
+                    // Overlaid as a sibling of the photo (not inside its clip or
+                    // its combined accessibility element) so the single camera
+                    // control stays tappable and separately labelled.
+                    .overlay(alignment: .center) { cameraButton(diameter: diameter) }
+                    .overlay { importingIndicator }
                 Spacer().frame(height: photoToLogoGap)
                 logo
             }
@@ -321,6 +342,54 @@ struct BirthdayView: View {
         .accessibilityLabel(store.image == nil ? "No photo yet" : "Birthday photo")
     }
 
+    // MARK: - Camera control
+
+    /// The theme-matched camera button, pinned to the photo ring at 45° in the
+    /// upper-right. It keeps a fixed 36pt visual / 44pt tap target regardless of
+    /// how far the photo shrinks on small screens, and its artwork is hidden from
+    /// accessibility so the button surfaces a single "Add photo"/"Change photo".
+    private func cameraButton(diameter: CGFloat) -> some View {
+        Button {
+            photoSelection.begin()
+        } label: {
+            Image(theme.cameraAssetName)
+                .resizable()
+                .scaledToFit()
+                .frame(width: 36, height: 36)
+                .frame(width: 44, height: 44)
+                .contentShape(Rectangle())
+                .accessibilityHidden(true)
+        }
+        .buttonStyle(.plain)
+        .disabled(photoSelection.isImporting)
+        .accessibilityLabel(store.image == nil ? "Add photo" : "Change photo")
+        .accessibilityIdentifier("birthdayPhotoButton")
+        // Place the control's centre on the ring: the nominal 222pt circle inside
+        // the 229pt outer bounds, resolved to a 45° offset on each axis.
+        .offset(x: cameraOffset(diameter: diameter), y: -cameraOffset(diameter: diameter))
+    }
+
+    /// Per-axis distance from the photo centre to the ring at 45°:
+    /// `diameter × (222/229) / (2√2)`. Uses the live rendered diameter so the
+    /// control tracks the ring as the photo scales.
+    private func cameraOffset(diameter: CGFloat) -> CGFloat {
+        diameter * (222.0 / 229.0) / (2 * CGFloat(2).squareRoot())
+    }
+
+    /// A centred spinner shown over the photo slot while a selection is being
+    /// imported; selection is disabled meanwhile, but the close button stays
+    /// reachable above it.
+    @ViewBuilder
+    private var importingIndicator: some View {
+        if photoSelection.isImporting {
+            ProgressView()
+                .controlSize(.large)
+                .padding(24)
+                .background(.ultraThinMaterial, in: Circle())
+                .accessibilityLabel("Importing photo")
+        }
+    }
+
     // MARK: - Logo
 
     private var logo: some View {
@@ -334,7 +403,14 @@ struct BirthdayView: View {
     // MARK: - Close
 
     private var closeButton: some View {
-        Button(action: onClose) {
+        Button {
+            // Explicitly cancel any in-flight import and pending authorization so
+            // a late result from the dismissed screen cannot mutate the store or
+            // try to present. (We never cancel on `onDisappear`, which also fires
+            // when this screen presents its own camera cover.)
+            photoSelection.invalidate()
+            onClose()
+        } label: {
             Image(BirthdayAsset.closeArrow)
                 .resizable()
                 .scaledToFit()

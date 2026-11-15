@@ -1,9 +1,8 @@
-import PhotosUI
 import SwiftUI
 import UIKit
 
 /// The app's opening screen: title, editable name, birthday, picture, and the
-/// button that will present the birthday screen in a later step.
+/// button that presents the full-screen birthday screen.
 ///
 /// Editing and persistence are driven by an injected `DetailsStore`, so previews
 /// and tests can supply isolated storage. Styling is intentionally minimal —
@@ -16,25 +15,10 @@ struct DetailsView: View {
 
     @State private var isEditingBirthday = false
     @State private var showBirthday = false
-    @State private var showPhotoOptions = false
-    @State private var showLibraryPicker = false
-    @State private var selectedPhotoItem: PhotosPickerItem?
-    @State private var presentCamera = false
-    @State private var cameraMessage: String?
 
-    // A camera capture awaiting the camera cover's actual dismissal. Persisting
-    // (and any resulting save-error alert) is deferred to the cover's onDismiss
-    // so the alert is never requested while the full-screen camera is still on
-    // screen. Cleared on commit, so a repeat dismissal can't save twice and no
-    // stale capture survives into the next presentation.
-    @State private var stagedCameraImage: UIImage?
-
-    // Photo-import coordination: a generation counter lets a newer selection or
-    // a camera capture supersede a slower in-flight library import so stale
-    // results can never overwrite the latest choice.
-    @State private var isImportingPhoto = false
-    @State private var photoImportTask: Task<Void, Never>?
-    @State private var photoGeneration = 0
+    // The shared add/change-photo flow (dialog, picker, camera, import
+    // coordination). The birthday screen owns its own instance.
+    @StateObject private var photoSelection = PhotoSelection()
 
     private static let birthdayFormatter: DateFormatter = {
         let formatter = DateFormatter()
@@ -72,20 +56,10 @@ struct DetailsView: View {
                 }
             }
         }
-        .confirmationDialog("Add a photo", isPresented: $showPhotoOptions, titleVisibility: .visible) {
-            Button("Choose from Library") { showLibraryPicker = true }
-            Button("Take Photo") { startCamera() }
-            Button("Cancel", role: .cancel) {}
-        }
-        // The default (out-of-process) picker needs no photo-library permission.
-        .photosPicker(
-            isPresented: $showLibraryPicker,
-            selection: $selectedPhotoItem,
-            matching: .images
-        )
-        .onChange(of: selectedPhotoItem) { _, newItem in
-            importLibrarySelection(newItem)
-        }
+        // Dialog, library picker, camera, and the camera/store error alerts. The
+        // store-error alert is suppressed while the birthday screen covers this
+        // one, so the birthday screen presents those errors instead.
+        .photoSelection(photoSelection, store: store, presentsStoreErrors: !showBirthday)
         .sheet(isPresented: $isEditingBirthday) {
             BirthdayPickerSheet(
                 // Seed from the canonical stored day at GMT so the picker opens
@@ -103,45 +77,6 @@ struct DetailsView: View {
         .fullScreenCover(isPresented: $showBirthday) {
             BirthdayView(store: store, onClose: { showBirthday = false })
         }
-        .fullScreenCover(isPresented: $presentCamera, onDismiss: commitStagedCapture) {
-            CameraPicker(
-                onImage: { image in
-                    // Supersede any in-flight library import immediately so a late
-                    // import result can't win, then stage the capture and begin
-                    // dismissing. The save itself is deferred to onDismiss.
-                    photoImportTask?.cancel()
-                    photoGeneration += 1
-                    isImportingPhoto = false
-                    selectedPhotoItem = nil
-                    stagedCameraImage = image
-                    presentCamera = false
-                },
-                onCancel: { presentCamera = false }
-            )
-            .ignoresSafeArea()
-        }
-        .alert(
-            "Camera",
-            isPresented: Binding(
-                get: { cameraMessage != nil },
-                set: { if !$0 { cameraMessage = nil } }
-            )
-        ) {
-            Button("OK", role: .cancel) { cameraMessage = nil }
-        } message: {
-            Text(cameraMessage ?? "")
-        }
-        .alert(
-            "Something went wrong",
-            isPresented: Binding(
-                get: { store.errorMessage != nil },
-                set: { if !$0 { store.errorMessage = nil } }
-            )
-        ) {
-            Button("OK", role: .cancel) { store.errorMessage = nil }
-        } message: {
-            Text(store.errorMessage ?? "")
-        }
     }
 
     // MARK: - Picture
@@ -149,11 +84,11 @@ struct DetailsView: View {
     private var picture: some View {
         Button {
             nameFieldFocused = false
-            showPhotoOptions = true
+            photoSelection.begin()
         } label: {
             pictureContent
                 .overlay {
-                    if isImportingPhoto {
+                    if photoSelection.isImporting {
                         ProgressView()
                             .controlSize(.large)
                             .padding(24)
@@ -163,7 +98,7 @@ struct DetailsView: View {
                 }
         }
         .buttonStyle(.plain)
-        .disabled(isImportingPhoto)
+        .disabled(photoSelection.isImporting)
         .accessibilityLabel(store.image == nil ? "Add photo" : "Change photo")
         .accessibilityIdentifier("photoButton")
     }
@@ -248,6 +183,9 @@ struct DetailsView: View {
     private var showBirthdayButton: some View {
         Button {
             nameFieldFocused = false
+            // A library import started on this screen must not overwrite a photo
+            // the user later picks on the birthday screen, so supersede it here.
+            photoSelection.invalidate()
             showBirthday = true
         } label: {
             // Fill the available width and wrap centered at large sizes rather
@@ -261,61 +199,6 @@ struct DetailsView: View {
         .buttonBorderShape(.roundedRectangle)
         .disabled(!store.isReadyToShowBirthday)
         .accessibilityIdentifier("showBirthdayButton")
-    }
-
-    // MARK: - Photo import
-
-    private func importLibrarySelection(_ item: PhotosPickerItem?) {
-        guard let item else { return }
-
-        // Cancel a slower earlier import and claim the newest generation.
-        photoImportTask?.cancel()
-        photoGeneration += 1
-        let generation = photoGeneration
-        isImportingPhoto = true
-
-        photoImportTask = Task {
-            let image = try? await item.loadTransferable(type: Data.self).flatMap { UIImage(data: $0) }
-            await MainActor.run {
-                // A newer selection or a camera photo has superseded this one:
-                // discard the result and leave the existing photo untouched.
-                guard generation == photoGeneration else { return }
-                if let image {
-                    store.setPhoto(image)
-                } else {
-                    store.reportImportFailure()
-                }
-                isImportingPhoto = false
-                selectedPhotoItem = nil
-            }
-        }
-    }
-
-    // MARK: - Camera
-
-    private func startCamera() {
-        guard CameraAccess.isAvailable else {
-            cameraMessage = "The camera isn’t available on this device."
-            return
-        }
-        CameraAccess.requestAccess { granted in
-            if granted {
-                presentCamera = true
-            } else {
-                cameraMessage = "Camera access is off. You can turn it on in Settings › Privacy › Camera."
-            }
-        }
-    }
-
-    /// Persist a staged camera capture once the camera cover is actually gone, so
-    /// a save-error alert can appear over the details screen rather than being
-    /// requested behind the dismissing cover. A cancelled camera stages nothing,
-    /// so the previous photo is preserved. The staged image is cleared first so a
-    /// repeated dismissal can't save twice.
-    private func commitStagedCapture() {
-        guard let image = stagedCameraImage else { return }
-        stagedCameraImage = nil
-        store.setPhoto(image)
     }
 }
 
