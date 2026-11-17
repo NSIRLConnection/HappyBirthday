@@ -87,6 +87,9 @@ enum BirthdayAsset {
     static let swirlRight = "birthday-swirl-right"
     static let logo = "nanit-logo"
     static let closeArrow = "birthday-close-arrow"
+    /// The original curved share arrow (white artwork with transparent bounds)
+    /// shown to the right of the "Share the news" label on the share button.
+    static let shareIcon = "birthday-share-icon"
 
     // The theme-matched camera controls (white camera + plus on the ring),
     // mapped per theme in `BirthdayTheme.cameraAssetName`.
@@ -106,7 +109,7 @@ enum BirthdayAsset {
             "birthday-baby-fox",
             "birthday-baby-elephant",
             "birthday-baby-pelican",
-            swirlLeft, swirlRight, logo, closeArrow,
+            swirlLeft, swirlRight, logo, closeArrow, shareIcon,
             cameraGreen, cameraBlue, cameraYellow,
         ]
         names += (0...9).map { "birthday-digit-\($0)" }

@@ -3,16 +3,14 @@ import UIKit
 
 /// The celebratory birthday screen presented from the details screen.
 ///
-/// Layout follows the supplied design and exported artwork: a centered,
-/// two-line-capable title; the age number rendered from the decorative digit
-/// assets and flanked by the swirl artwork; the singular/plural unit caption;
-/// the child's photo framed by the theme's ringed placeholder; and the Nanit
-/// logo — all above a bottom-pinned, aspect-preserving illustration. A top-left
-/// close button returns to the details screen unchanged.
-///
-/// Layer order matters: the photo sits beneath the illustration (the animal and
-/// foliage cross its lower edges), while the title, age, logo, and close button
-/// sit above it.
+/// The themed content — two-line-capable title, decorative age artwork flanked by
+/// swirls, the singular/plural unit caption, the child's ringed photo, the Nanit
+/// logo, and a bottom-pinned illustration — is drawn by the shared, content-only
+/// `BirthdayContent` composition. This view layers the interactive controls on
+/// top: a top-left close button, the single camera control on the photo ring, and
+/// the bottom "Share the news" button. Because the share export reuses the same
+/// `BirthdayContent` with an empty control overlay, the shared image omits the
+/// share, camera, and close controls by construction.
 struct BirthdayView: View {
     @ObservedObject var store: DetailsStore
     let onClose: () -> Void
@@ -22,8 +20,22 @@ struct BirthdayView: View {
     // camera, import coordination) independently of the details screen behind it.
     @StateObject private var photoSelection = PhotoSelection()
     @Environment(\.dynamicTypeSize) private var dynamicTypeSize
-    @ScaledMetric(relativeTo: .title2) private var titleFontSize: CGFloat = 21
-    @ScaledMetric(relativeTo: .title2) private var unitFontSize: CGFloat = 21
+    @Environment(\.displayScale) private var displayScale
+
+    @ScaledMetric(relativeTo: .body) private var shareFontSize: CGFloat = 16
+    @ScaledMetric(relativeTo: .body) private var shareIconHeight: CGFloat = 33.6378
+
+    /// The latest measured viewport, captured so a share tap can render the
+    /// composition at the same width/height the screen is showing. Seeded with the
+    /// 375×667 reference so a share before the first layout still renders.
+    @State private var canvasSize: CGSize = CGSize(width: 375, height: 667)
+    /// The latest measured safe-area insets, captured alongside the size so the
+    /// export reproduces the full physical canvas (status-bar and home-indicator
+    /// strips painted as themed content) rather than only the inset content rect.
+    @State private var canvasInsets: EdgeInsets = EdgeInsets()
+    /// The prepared image handed to the system share sheet; non-nil presents it.
+    @State private var shareImage: UIImage?
+    @State private var shareError: String?
 
     init(store: DetailsStore,
          themeProvider: @escaping () -> BirthdayTheme = BirthdayTheme.presentationProvider(),
@@ -39,21 +51,11 @@ struct BirthdayView: View {
         ))
     }
 
-    // MARK: - Reference geometry (375×667 frame)
+    // MARK: - Share button geometry
 
-    private let horizontalPadding: CGFloat = 24
-    /// Outer diameter of the ringed placeholder (its full render bounds).
-    private let referenceDiameter: CGFloat = 229
-    /// The photo sits inside the 7pt ring: 229 − 2×7 = 215.
-    private let photoInsetRatio: CGFloat = 215.0 / 229.0
-    private let swirlSize = CGSize(width: 51.2, height: 44.53)
-    private let digitHeight: CGFloat = 87.95
-    private let swirlToDigitGap: CGFloat = 22
-    private let logoSize = CGSize(width: 58.68, height: 19.63)
-    private let photoToLogoGap: CGFloat = 15
-    /// Reference distance from the logo's bottom to the physical screen bottom
-    /// (the lower band reserved for the step-5 share button).
-    private let logoBottomReference: CGFloat = 149.37
+    /// Intrinsic aspect of the original share arrow (30.2802 × 33.6378).
+    private let shareIconAspect: CGFloat = 30.2802 / 33.6378
+    private let shareCoral = Color(hex: 0xEF7B7B)
 
     private var theme: BirthdayTheme { model.theme }
 
@@ -65,14 +67,6 @@ struct BirthdayView: View {
         store.name.trimmingCharacters(in: .whitespacesAndNewlines)
     }
 
-    private var titleString: String {
-        "TODAY \(trimmedName) IS".uppercased()
-    }
-
-    private var accessibleAgeLabel: String {
-        "Today \(trimmedName) is \(age.accessibleDescription)"
-    }
-
     var body: some View {
         GeometryReader { geo in
             ZStack(alignment: .topLeading) {
@@ -80,117 +74,73 @@ struct BirthdayView: View {
                     .ignoresSafeArea()
 
                 if prefersScrollLayout(geo) {
-                    illustration()
+                    BirthdayIllustration(theme: theme)
                     scrollLayout(in: geo)
                 } else {
-                    layeredLayout(in: geo)
+                    BirthdayContent(
+                        size: geo.size,
+                        safeAreaBottom: geo.safeAreaInsets.bottom,
+                        theme: theme,
+                        age: age,
+                        trimmedName: trimmedName,
+                        image: store.image,
+                        photoOverlay: { diameter in photoControls(diameter: diameter) }
+                    )
+                    bottomShareBar(geo)
                 }
 
                 closeButton
             }
+            .onAppear { canvasSize = geo.size; canvasInsets = geo.safeAreaInsets }
+            .onChange(of: geo.size) { _, newValue in canvasSize = newValue }
+            .onChange(of: geo.safeAreaInsets) { _, newValue in canvasInsets = newValue }
         }
         // Dialog, library picker, camera, and the camera/import error alerts —
         // presented from the birthday screen itself so they appear above it
         // rather than on the hidden details screen underneath.
         .photoSelection(photoSelection, store: store)
+        // The system share sheet is presented from a controller embedded here, so
+        // it appears above the full-screen birthday cover.
+        .background(ActivityShareSheet(image: $shareImage))
+        .alert("Couldn’t share", isPresented: shareErrorBinding) {
+            Button("OK", role: .cancel) { shareError = nil }
+        } message: {
+            Text(shareError ?? "")
+        }
     }
 
     /// Fall back to a scrollable, single-stack layout when the design's fixed
-    /// composition cannot hold the content: accessibility text sizes, or a short
-    /// (e.g. landscape) height.
+    /// composition cannot hold the content. Shares the exact decision the export
+    /// uses (`BirthdayLayout.prefersFullContentLayout`) so the live screen and the
+    /// shared image never diverge on which layout they draw.
     private func prefersScrollLayout(_ geo: GeometryProxy) -> Bool {
-        // Wide/landscape viewports (e.g. unfolded Duo) would let a width-sized
-        // illustration grow tall enough to cover the photo in the fixed
-        // composition, so fall back to the adaptive scroll layout where the age
-        // and photo stay visible over the backdrop.
-        dynamicTypeSize.isAccessibilitySize
-            || geo.size.height < 600
-            || geo.size.width > geo.size.height
-    }
-
-    // MARK: - Layered (design) layout
-
-    private func layeredLayout(in geo: GeometryProxy) -> some View {
-        let diameter = circleDiameter(for: geo)
-        let contentWidth = contentWidth(for: geo)
-        return ZStack {
-            // Photo beneath the illustration…
-            skeleton(in: geo, diameter: diameter, contentWidth: contentWidth,
-                     showPhoto: true, showText: false)
-            illustration()
-            // …title, age, and logo above it.
-            skeleton(in: geo, diameter: diameter, contentWidth: contentWidth,
-                     showPhoto: false, showText: true)
-        }
-        // Pin the composition to the actual viewport so no child can enlarge it.
-        .frame(width: geo.size.width, height: geo.size.height)
-    }
-
-    /// The shared layout skeleton. Both passes render every element (hidden ones
-    /// via opacity) so the photo in the lower layer lines up exactly with its
-    /// transparent slot in the upper layer.
-    private func skeleton(in geo: GeometryProxy,
-                          diameter: CGFloat,
-                          contentWidth: CGFloat,
-                          showPhoto: Bool,
-                          showText: Bool) -> some View {
-        VStack(spacing: 0) {
-            // Two flexible spacers (here and below the header) split the space
-            // above the circle, centering the header between the status bar and
-            // the circle instead of top-anchoring it on tall devices.
-            Spacer(minLength: 0)
-            header(availableWidth: contentWidth, decorative: !showText)
-                .opacity(showText ? 1 : 0)
-            Spacer(minLength: 20)
-
-            Group {
-                if showPhoto {
-                    // Lower pass: the photo only, which sits beneath the
-                    // illustration. The camera control is deliberately absent
-                    // here so it is never duplicated or buried under the art.
-                    photoView(diameter: diameter)
-                } else {
-                    // Upper (foreground) pass: a transparent slot aligned with
-                    // the photo below, carrying the single camera control and the
-                    // import spinner above the illustration.
-                    Color.clear
-                        .frame(width: diameter, height: diameter)
-                        .overlay(alignment: .center) { cameraButton(diameter: diameter) }
-                        .overlay { importingIndicator }
-                }
-            }
-
-            Spacer().frame(height: photoToLogoGap)
-            // The logo is decorative and always hidden from accessibility (see
-            // `logo`); only its visibility toggles between the two passes.
-            logo
-                .opacity(showText ? 1 : 0)
-
-            Spacer().frame(height: logoBottomReserve(geo))
-        }
-        .padding(.horizontal, horizontalPadding)
-        .frame(width: geo.size.width, height: geo.size.height)
+        BirthdayLayout.prefersFullContentLayout(size: geo.size, dynamicTypeSize: dynamicTypeSize)
     }
 
     // MARK: - Scroll (fallback) layout
 
     private func scrollLayout(in geo: GeometryProxy) -> some View {
-        let diameter = circleDiameter(for: geo)
-        let contentWidth = contentWidth(for: geo)
+        let diameter = BirthdayLayout.circleDiameter(width: geo.size.width, height: geo.size.height)
+        let contentWidth = BirthdayLayout.contentWidth(width: geo.size.width)
         return ScrollView {
             VStack(spacing: 0) {
-                header(availableWidth: contentWidth, decorative: false)
+                BirthdayHeader(trimmedName: trimmedName, age: age,
+                               availableWidth: contentWidth, decorative: false)
                 Spacer().frame(height: 28)
-                photoView(diameter: diameter)
+                BirthdayPhoto(theme: theme, image: store.image, diameter: diameter)
                     // Overlaid as a sibling of the photo (not inside its clip or
                     // its combined accessibility element) so the single camera
                     // control stays tappable and separately labelled.
                     .overlay(alignment: .center) { cameraButton(diameter: diameter) }
                     .overlay { importingIndicator }
-                Spacer().frame(height: photoToLogoGap)
-                logo
+                Spacer().frame(height: BirthdayLayout.photoToLogoGap)
+                BirthdayLogo()
+                // Keep the share button after the logo with a comfortable gap, so
+                // it stays reachable by scrolling at large text sizes.
+                Spacer().frame(height: 32)
+                shareButton
             }
-            .padding(.horizontal, horizontalPadding)
+            .padding(.horizontal, BirthdayLayout.horizontalPadding)
             .padding(.top, 72)
             .padding(.bottom, 48)
             .frame(maxWidth: .infinity)
@@ -198,151 +148,16 @@ struct BirthdayView: View {
         }
     }
 
-    // MARK: - Illustration
-
-    private func illustration() -> some View {
-        // A dedicated reader that ignores the safe area FIRST, so it measures the
-        // actual full-screen canvas (physical display) instead of the inset
-        // content rect — this is what makes the backdrop reach the right/bottom
-        // physical edges on folded Duo rather than ending at the safe-area edge.
-        GeometryReader { canvas in
-            let width = max(0, canvas.size.width)
-            let height = max(0, canvas.size.height)
-            // Width-driven, full-bleed decoration: the art's pixels fill the
-            // canvas width exactly, with the height derived from the intrinsic
-            // aspect ratio so nothing is stretched. A zero width draws nothing.
-            let drawHeight = width > 0 ? width * backgroundAspectRatio : 0
-            Image(theme.backgroundAssetName)
-                .resizable()
-                .frame(width: width, height: drawHeight)
-                // Pin into the EXPLICIT, finite canvas frame and clip, so the
-                // huge intrinsic draw height never inflates layout; bottom
-                // alignment crops overflow at the (transparent) top.
-                .frame(width: width, height: height, alignment: .bottom)
-                .clipped()
-        }
-        .ignoresSafeArea()
-        .allowsHitTesting(false)
-        .accessibilityHidden(true)
-    }
-
-    /// Intrinsic height-to-width ratio of the current theme's illustration, read
-    /// from the bundled image so the full-bleed draw height stays exact without
-    /// hard-coded pixel dimensions. Falls back to a square if the image is
-    /// somehow unavailable.
-    private var backgroundAspectRatio: CGFloat {
-        guard let image = UIImage(named: theme.backgroundAssetName),
-              image.size.width > 0 else { return 1 }
-        return image.size.height / image.size.width
-    }
-
-    // MARK: - Header (title + age + unit)
-
-    /// - Parameter decorative: the lower (photo) pass renders an identical but
-    ///   hidden header purely to reserve space for alignment. It must expose no
-    ///   age label or `birthdayAge` identifier, so only the single visible header
-    ///   surfaces one combined spoken phrase to VoiceOver and UI tests.
-    private func header(availableWidth: CGFloat, decorative: Bool) -> some View {
-        // At accessibility text sizes use the full available width so a long
-        // name completes across two lines instead of truncating against the
-        // 226pt reference cap that the normal-size design relies on.
-        let titleMaxWidth = dynamicTypeSize.isAccessibilitySize
-            ? availableWidth
-            : min(226, availableWidth)
-        return VStack(spacing: 0) {
-            titleText(maxWidth: titleMaxWidth)
-            Spacer().frame(height: 13)
-            ageRow(maxWidth: availableWidth)
-            Spacer().frame(height: 14)
-            unitText
-        }
-        .frame(maxWidth: .infinity)
-        .modifier(HeaderAccessibility(decorative: decorative, label: accessibleAgeLabel))
-    }
-
-    private func titleText(maxWidth: CGFloat) -> some View {
-        // One Text wraps the complete title across up to two lines for a long
-        // name, scaling down before it would overflow, rather than splitting the
-        // name into a separate label.
-        Text(titleString)
-            .font(.system(size: titleFontSize, weight: .medium))
-            .tracking(-0.4201)
-            .foregroundStyle(BirthdayTheme.titleColor)
-            .multilineTextAlignment(.center)
-            .lineLimit(2)
-            .minimumScaleFactor(0.6)
-            .fixedSize(horizontal: false, vertical: true)
-            .frame(maxWidth: maxWidth)
-    }
-
-    private func ageRow(maxWidth: CGFloat) -> some View {
-        HStack(spacing: swirlToDigitGap) {
-            Image(BirthdayAsset.swirlLeft)
-                .resizable()
-                .scaledToFit()
-                .frame(width: swirlSize.width, height: swirlSize.height)
-            digits
-            Image(BirthdayAsset.swirlRight)
-                .resizable()
-                .scaledToFit()
-                .frame(width: swirlSize.width, height: swirlSize.height)
-        }
-        .fixedSize()
-        // Preserve every glyph's aspect ratio, shrinking the whole block to fit
-        // a narrow width (or a multi-digit age) instead of distorting it.
-        .modifier(FitToWidth(maxWidth: maxWidth))
-    }
-
-    private var digits: some View {
-        let characters = Array(String(age.value))
-        return HStack(spacing: 2) {
-            ForEach(characters.indices, id: \.self) { index in
-                Image(BirthdayAsset.digit(characters[index]))
-                    .resizable()
-                    .scaledToFit()
-                    .frame(height: digitHeight)
-            }
-        }
-    }
-
-    private var unitText: some View {
-        Text(age.unitLabel)
-            .font(.system(size: unitFontSize, weight: .medium))
-            .tracking(-0.4201)
-            .foregroundStyle(BirthdayTheme.titleColor)
-            .multilineTextAlignment(.center)
-            .lineLimit(1)
-            .minimumScaleFactor(0.6)
-    }
-
-    // MARK: - Photo
-
-    private func photoView(diameter: CGFloat) -> some View {
-        ZStack {
-            // The complete ringed placeholder (ring + face). Its ring also frames
-            // a selected photo, so no separate frame/colour is drawn.
-            Image(theme.placeholderAssetName)
-                .resizable()
-                .scaledToFit()
-                .frame(width: diameter, height: diameter)
-
-            if let image = store.image {
-                // Read-only use of the stored photo: viewing, opening, and
-                // closing never rewrite or remove it. It is clipped to a circle
-                // that sits just inside the ring.
-                Image(uiImage: image)
-                    .resizable()
-                    .scaledToFill()
-                    .frame(width: diameter * photoInsetRatio, height: diameter * photoInsetRatio)
-                    .clipShape(Circle())
-            }
-        }
-        .frame(width: diameter, height: diameter)
-        .accessibilityElement()
-        .accessibilityLabel(store.image == nil ? "No photo yet" : "Birthday photo")
-    }
-
     // MARK: - Camera control
+
+    /// The camera control and the import spinner, injected into the foreground
+    /// photo slot of the fixed composition.
+    private func photoControls(diameter: CGFloat) -> some View {
+        ZStack {
+            importingIndicator
+            cameraButton(diameter: diameter)
+        }
+    }
 
     /// The theme-matched camera button, pinned to the photo ring at 45° in the
     /// upper-right. It keeps a fixed 36pt visual / 44pt tap target regardless of
@@ -390,14 +205,87 @@ struct BirthdayView: View {
         }
     }
 
-    // MARK: - Logo
+    // MARK: - Share control
 
-    private var logo: some View {
-        Image(BirthdayAsset.logo)
-            .resizable()
-            .scaledToFit()
-            .frame(width: logoSize.width, height: logoSize.height)
-            .accessibilityHidden(true)
+    /// A bottom-pinned bar holding the share button in the reserved lower band,
+    /// its bottom edge ~56pt above the physical bottom (per design), without
+    /// moving the existing composition above it.
+    private func bottomShareBar(_ geo: GeometryProxy) -> some View {
+        VStack {
+            Spacer()
+            shareButton
+                .padding(.bottom, max(56 - geo.safeAreaInsets.bottom, 12))
+        }
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
+    }
+
+    /// The coral "Share the news" capsule with the original curved share arrow.
+    /// The capsule renders at the 179×42 reference but grows for larger text and
+    /// keeps at least a 44pt tap target; the words are never dropped.
+    private var shareButton: some View {
+        Button {
+            beginShare()
+        } label: {
+            // No explicit gap: the original share glyph already carries a built-in
+            // ~5.89pt left inset, matching the Figma near-zero text-to-icon gap.
+            HStack(spacing: 0) {
+                Text("Share the news")
+                    .font(.system(size: shareFontSize, weight: .regular))
+                    .foregroundStyle(.white)
+                    .lineLimit(1)
+                    .minimumScaleFactor(0.7)
+                Image(BirthdayAsset.shareIcon)
+                    .resizable()
+                    .scaledToFit()
+                    .frame(width: shareIconHeight * shareIconAspect, height: shareIconHeight)
+                    .accessibilityHidden(true)
+            }
+            // Snug horizontal padding so the default capsule resolves to the
+            // 179pt reference width (minWidth) instead of overflowing past it,
+            // while larger text sizes can still grow the capsule.
+            .padding(.horizontal, 16)
+            .frame(minWidth: 179, minHeight: 42)
+            .background(Capsule().fill(shareCoral))
+            // Keep at least a 44pt tap target even though the capsule is 42pt tall.
+            .frame(minHeight: 44)
+            .contentShape(Capsule())
+        }
+        .buttonStyle(.plain)
+        .disabled(isShareDisabled)
+        .accessibilityLabel("Share the news")
+        .accessibilityIdentifier("birthdayShareButton")
+    }
+
+    /// Prevent duplicate share requests while a sheet is up, and avoid sharing a
+    /// stale photo while a newer selection is still importing.
+    private var isShareDisabled: Bool {
+        shareImage != nil || photoSelection.isImporting
+    }
+
+    /// Build the share image from an immutable snapshot of the current theme,
+    /// derived age, name, and photo at tap time. A failed render surfaces a
+    /// concise error rather than presenting an empty share sheet.
+    private func beginShare() {
+        guard !isShareDisabled else { return }
+        let size = canvasSize == .zero ? CGSize(width: 375, height: 667) : canvasSize
+        if let rendered = BirthdayShareRenderer.render(
+            theme: model.theme,
+            age: age,
+            name: store.name,
+            image: store.image,
+            size: size,
+            safeAreaInsets: canvasInsets,
+            scale: displayScale,
+            dynamicTypeSize: dynamicTypeSize
+        ) {
+            shareImage = rendered
+        } else {
+            shareError = "We couldn’t prepare the image to share. Please try again."
+        }
+    }
+
+    private var shareErrorBinding: Binding<Bool> {
+        Binding(get: { shareError != nil }, set: { if !$0 { shareError = nil } })
     }
 
     // MARK: - Close
@@ -422,86 +310,6 @@ struct BirthdayView: View {
         .accessibilityIdentifier("closeBirthday")
         .padding(.leading, 8)
         .padding(.top, 8)
-    }
-
-    // MARK: - Metrics
-
-    /// The circle keeps a minimum 50pt horizontal margin on each side, never
-    /// exceeds its reference ~229pt diameter, and leaves room on short screens.
-    /// A transient zero/unmeasured geometry yields 0 rather than a negative
-    /// (invalid) frame dimension.
-    private func circleDiameter(for geo: GeometryProxy) -> CGFloat {
-        max(0, min(referenceDiameter, geo.size.width - 100, geo.size.height * 0.45))
-    }
-
-    /// Horizontal space for content after the side padding, never negative.
-    private func contentWidth(for geo: GeometryProxy) -> CGFloat {
-        max(0, geo.size.width - horizontalPadding * 2)
-    }
-
-    /// Keeps the logo's bottom ~149pt above the physical bottom (the reserved
-    /// share band), while never letting it drop into the bottom safe area.
-    private func logoBottomReserve(_ geo: GeometryProxy) -> CGFloat {
-        max(logoBottomReference - geo.safeAreaInsets.bottom, 24)
-    }
-}
-
-/// Folds the title, numeric artwork, and unit into one spoken phrase for the
-/// visible header, and makes the duplicate (decorative) header completely
-/// invisible to accessibility — carrying no label or identifier — so exactly one
-/// `birthdayAge` element is ever exposed.
-private struct HeaderAccessibility: ViewModifier {
-    let decorative: Bool
-    let label: String
-
-    func body(content: Content) -> some View {
-        if decorative {
-            content.accessibilityHidden(true)
-        } else {
-            content
-                .accessibilityElement(children: .ignore)
-                .accessibilityLabel(label)
-                .accessibilityIdentifier("birthdayAge")
-        }
-    }
-}
-
-/// Scales its content down uniformly so its intrinsic width fits `maxWidth`,
-/// preserving aspect ratios. Used for the age block so a narrow screen or a
-/// multi-digit age shrinks the glyphs rather than distorting or clipping them.
-private struct FitToWidth: ViewModifier {
-    let maxWidth: CGFloat
-    @State private var intrinsic: CGSize = .zero
-
-    func body(content: Content) -> some View {
-        // Only scale when both the intrinsic width and the target width are
-        // valid, positive, finite numbers; an unmeasured/zero geometry leaves
-        // the block at its natural size rather than producing a zero/negative
-        // (invalid) frame.
-        let canScale = intrinsic.width > 0 && maxWidth > 0 && maxWidth.isFinite
-        let scale = (canScale && intrinsic.width > maxWidth)
-            ? maxWidth / intrinsic.width
-            : 1
-        content
-            .background(
-                GeometryReader { proxy in
-                    Color.clear.preference(key: SizeKey.self, value: proxy.size)
-                }
-            )
-            .onPreferenceChange(SizeKey.self) { intrinsic = $0 }
-            .scaleEffect(scale, anchor: .center)
-            .frame(
-                width: intrinsic == .zero ? nil : intrinsic.width * scale,
-                height: intrinsic == .zero ? nil : intrinsic.height * scale
-            )
-    }
-
-    private struct SizeKey: PreferenceKey {
-        static var defaultValue: CGSize = .zero
-        static func reduce(value: inout CGSize, nextValue: () -> CGSize) {
-            let next = nextValue()
-            if next != .zero { value = next }
-        }
     }
 }
 
